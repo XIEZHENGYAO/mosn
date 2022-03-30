@@ -14,7 +14,7 @@ MAJOR_VERSION   = $(shell cat VERSION)
 GIT_VERSION     = $(shell git log -1 --pretty=format:%h)
 GIT_NOTES       = $(shell git log -1 --oneline)
 
-BUILD_IMAGE     = godep-builder
+BUILD_IMAGE     = golang:1.14.13
 
 WASM_IMAGE      = mosn-wasm
 
@@ -35,46 +35,39 @@ ifneq ($(TAGS),)
 TAGS_OPT 		= -tags ${TAGS}
 endif
 
-
 ut-local:
-	GO111MODULE=off go test -gcflags=-l -v `go list ./pkg/... | grep -v pkg/mtls/crypto/tls | grep -v pkg/networkextention`
+	GO111MODULE=on go test -mod=vendor -gcflags=-l -v `go list ./pkg/... | grep -v pkg/mtls/crypto/tls | grep -v pkg/networkextention`
 	make unit-test-istio-${ISTIO_VERSION}
 
 unit-test:
-	docker build --rm -t ${BUILD_IMAGE} build/contrib/builder/binary
 	docker run --rm -v $(shell go env GOPATH):/go -v $(shell pwd):/go/src/${PROJECT_NAME} -w /go/src/${PROJECT_NAME} ${BUILD_IMAGE} make ut-local
 
 coverage-local:
 	sh ${SCRIPT_DIR}/report.sh
 
 coverage:
-	docker build --rm -t ${BUILD_IMAGE} build/contrib/builder/binary
 	docker run --rm -v $(shell go env GOPATH):/go -v $(shell pwd):/go/src/${PROJECT_NAME} -w /go/src/${PROJECT_NAME} ${BUILD_IMAGE} make coverage-local
 
 integrate-local:
-	GO111MODULE=off go test -p 1 -v ./test/integrate/...
+	GO111MODULE=on go test -mod=vendor -p 1 -v ./test/integrate/...
 
 integrate-local-netpoll:
-	GO111MODULE=off NETPOLL=on go test -p 1 -v ./test/integrate/...
+	GO111MODULE=on NETPOLL=on go test -mod=vendor -p 1 -v ./test/integrate/...
 
 integrate:
-	docker build --rm -t ${BUILD_IMAGE} build/contrib/builder/binary
 	docker run --rm -v $(shell go env GOPATH):/go -v $(shell pwd):/go/src/${PROJECT_NAME} -w /go/src/${PROJECT_NAME} ${BUILD_IMAGE} make integrate-local
 
 
 integrate-netpoll:
-	docker build --rm -t ${BUILD_IMAGE} build/contrib/builder/binary
 	docker run --rm -v $(shell go env GOPATH):/go -v $(shell pwd):/go/src/${PROJECT_NAME} -w /go/src/${PROJECT_NAME} ${BUILD_IMAGE} make integrate-local-netpoll
 
 integrate-framework:
 	@cd ./test/cases && bash run_all.sh
 
 integrate-new:
-	docker build --rm -t ${BUILD_IMAGE} build/contrib/builder/binary
 	docker run --rm -v $(shell go env GOPATH):/go -v $(shell pwd):/go/src/${PROJECT_NAME} -w /go/src/${PROJECT_NAME} ${BUILD_IMAGE} make integrate-framework
 
 build:
-	docker build --rm -t ${BUILD_IMAGE} build/contrib/builder/binary
 	docker run --rm -v $(shell pwd):/go/src/${PROJECT_NAME} -w /go/src/${PROJECT_NAME} ${BUILD_IMAGE} make build-local
 
 build-wasm-image:
@@ -95,7 +88,6 @@ build-local:
 	cp configs/${CONFIG_FILE} build/bundles/${MAJOR_VERSION}/binary
 	cp build/bundles/${MAJOR_VERSION}/binary/${TARGET}  build/bundles/${MAJOR_VERSION}/binary/${TARGET_SIDECAR}
 
-
 image:
 	@rm -rf IMAGEBUILD
 	cp -r build/contrib/builder/image IMAGEBUILD && cp build/bundles/${MAJOR_VERSION}/binary/${TARGET} IMAGEBUILD && cp -r configs IMAGEBUILD && cp -r etc IMAGEBUILD
@@ -103,18 +95,29 @@ image:
 	docker tag ${IMAGE_NAME}:${MAJOR_VERSION}-${GIT_VERSION} ${REPOSITORY}:${MAJOR_VERSION}-${GIT_VERSION}
 	rm -rf IMAGEBUILD
 
-
 # change istio version support
 istio-1.5.2:
 	@echo 1.5.2 > ISTIO_VERSION
+	@bash istio_ctrl.sh istio152
 	@cp istio/istio152/main/* ./cmd/mosn/main/
-	@go mod edit -replace github.com/envoyproxy/go-control-plane=github.com/envoyproxy/go-control-plane v0.9.4
+	@go mod edit -replace github.com/envoyproxy/go-control-plane=github.com/envoyproxy/go-control-plane@v0.9.4
+	@go mod edit -replace istio.io/api=istio.io/api@v0.0.0-20200227213531-891bf31f3c32
+	@go mod tidy
+	@go mod vendor
+
+istio-1.10.6:
+	@echo 1.10.6 > ISTIO_VERSION
+	@bash istio_ctrl.sh istio1100
+	@cp istio/istio1100/main/* ./cmd/mosn/main/
+	@go mod edit -replace istio.io/api=istio.io/api@v0.0.0-20211103171850-665ed2b92d52
+	@go mod edit -replace github.com/envoyproxy/go-control-plane=github.com/envoyproxy/go-control-plane@v0.10.0
 	@go mod tidy
 	@go mod vendor
 
 # istio test
-unit-test-istio-1.5.2:
-	GO111MODULE=off go test -gcflags=-l -v `go list ./istio/istio152/...`	
+unit-test-istio:
+	GO111MODULE=on go test -mod=vendor -gcflags="all=-N -l" -v `go list ./istio/...`
 
+	
 
 .PHONY: unit-test build image rpm upload shell

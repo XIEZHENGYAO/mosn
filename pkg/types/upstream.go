@@ -185,6 +185,9 @@ type ClusterInfo interface {
 	// ConectTimeout returns the connect timeout
 	ConnectTimeout() time.Duration
 
+	// IdleTimeout returns the idle timeout
+	IdleTimeout() time.Duration
+
 	// LbOriDstInfo returns the load balancer oridst config
 	LbOriDstInfo() LBOriDstInfo
 
@@ -325,6 +328,8 @@ type LBOriDstInfo interface {
 
 	// GET header name
 	GetHeader() string
+
+	IsReplaceLocal() bool
 }
 
 // SortedHosts is an implementation of sort.Interface
@@ -393,15 +398,4 @@ func (ss *SortedStringSetType) Less(i, j int) bool {
 // Swap swaps the elements with indexes i and j.
 func (ss *SortedStringSetType) Swap(i, j int) {
 	ss.keys[i], ss.keys[j] = ss.keys[j], ss.keys[i]
-}
-
-func init() {
-	ConnPoolFactories = make(map[api.ProtocolName]bool)
-}
-
-var ConnPoolFactories map[api.ProtocolName]bool
-
-func RegisterConnPoolFactory(protocol api.ProtocolName, registered bool) {
-	//other
-	ConnPoolFactories[protocol] = registered
 }

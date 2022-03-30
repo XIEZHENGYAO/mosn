@@ -45,30 +45,31 @@ import (
 	"mosn.io/pkg/buffer"
 )
 
+// TODO: move it to main
 func init() {
-	str.Register(protocol.HTTP2, &streamConnFactory{})
 	protocol.RegisterProtocolConfigHandler(protocol.HTTP2, streamConfigHandler)
+	protocol.RegisterProtocol(protocol.HTTP2, NewConnPool, &StreamConnFactory{}, protocol.GetStatusCodeMapping{})
 }
 
-type streamConnFactory struct{}
+type StreamConnFactory struct{}
 
-func (f *streamConnFactory) CreateClientStream(context context.Context, connection types.ClientConnection,
+func (f *StreamConnFactory) CreateClientStream(context context.Context, connection types.ClientConnection,
 	clientCallbacks types.StreamConnectionEventListener, connCallbacks api.ConnectionEventListener) types.ClientStreamConnection {
 	return newClientStreamConnection(context, connection, clientCallbacks)
 }
 
-func (f *streamConnFactory) CreateServerStream(context context.Context, connection api.Connection,
+func (f *StreamConnFactory) CreateServerStream(context context.Context, connection api.Connection,
 	serverCallbacks types.ServerStreamConnectionEventListener) types.ServerStreamConnection {
 	return newServerStreamConnection(context, connection, serverCallbacks)
 }
 
-func (f *streamConnFactory) CreateBiDirectStream(context context.Context, connection types.ClientConnection,
+func (f *StreamConnFactory) CreateBiDirectStream(context context.Context, connection types.ClientConnection,
 	clientCallbacks types.StreamConnectionEventListener,
 	serverCallbacks types.ServerStreamConnectionEventListener) types.ClientStreamConnection {
 	return nil
 }
 
-func (f *streamConnFactory) ProtocolMatch(context context.Context, prot string, magic []byte) error {
+func (f *StreamConnFactory) ProtocolMatch(context context.Context, prot string, magic []byte) error {
 	var size int
 	var again bool
 	if len(magic) >= len(http2.ClientPreface) {
@@ -109,10 +110,6 @@ func (conn *streamConnection) Protocol() types.ProtocolName {
 
 func (conn *streamConnection) EnableWorkerPool() bool {
 	return true
-}
-
-func (conn *streamConnection) GoAway() {
-	// todo
 }
 
 // types.Stream
@@ -196,6 +193,10 @@ type serverStreamConnection struct {
 	config  StreamConfig
 
 	serverCallbacks types.ServerStreamConnectionEventListener
+}
+
+func (conn *serverStreamConnection) GoAway() {
+	conn.sc.GracefulShutdown()
 }
 
 func newServerStreamConnection(ctx context.Context, connection api.Connection, serverCallbacks types.ServerStreamConnectionEventListener) types.ServerStreamConnection {
@@ -633,6 +634,10 @@ type clientStreamConnection struct {
 	streamConnectionEventListener types.StreamConnectionEventListener
 }
 
+func (conn *clientStreamConnection) GoAway() {
+	// todo
+}
+
 func newClientStreamConnection(ctx context.Context, connection api.Connection,
 	clientCallbacks types.StreamConnectionEventListener) types.ClientStreamConnection {
 
@@ -1065,6 +1070,12 @@ reset:
 	}
 	// fix: https://github.com/mosn/mosn/issues/1672
 	if strings.Contains(err.Error(), "broken pipe") || strings.Contains(err.Error(), "connection reset by peer") {
+		s.ResetStream(types.StreamConnectionFailed)
+		return
+	}
+	// fix: https://github.com/mosn/mosn/issues/1900
+	if err == http2.ErrStreamID || err == http2.ErrDepStreamID {
+		s.sc.streamConnectionEventListener.OnGoAway()
 		s.ResetStream(types.StreamConnectionFailed)
 		return
 	}

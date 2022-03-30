@@ -88,9 +88,14 @@ func newSimpleCluster(clusterConfig v2.Cluster) types.Cluster {
 		info.connectTimeout = network.DefaultConnectTimeout
 	}
 
+	// set IdleTimeout
+	if clusterConfig.IdleTimeout != nil {
+		info.idleTimeout = clusterConfig.IdleTimeout.Duration
+	}
+
 	// tls mng
 	if !info.clusterManagerTLS {
-		mgr, err := mtls.NewTLSClientContextManager(&clusterConfig.TLS)
+		mgr, err := mtls.NewTLSClientContextManager(clusterConfig.Name, &clusterConfig.TLS)
 		if err != nil {
 			log.DefaultLogger.Alertf("cluster.config", "[upstream] [cluster] [new cluster] create tls context manager failed, %v", err)
 		}
@@ -179,6 +184,7 @@ type clusterInfo struct {
 	clusterManagerTLS    bool
 	tlsMng               types.TLSClientContextManager
 	connectTimeout       time.Duration
+	idleTimeout          time.Duration
 	lbConfig             v2.IsCluster_LbConfig
 }
 
@@ -229,6 +235,10 @@ func (ci *clusterInfo) LbSubsetInfo() types.LBSubsetInfo {
 
 func (ci *clusterInfo) ConnectTimeout() time.Duration {
 	return ci.connectTimeout
+}
+
+func (ci *clusterInfo) IdleTimeout() time.Duration {
+	return ci.idleTimeout
 }
 
 func (ci *clusterInfo) LbOriDstInfo() types.LBOriDstInfo {

@@ -18,20 +18,21 @@
 package cluster
 
 import (
-	"container/heap"
 	"sync"
 	"time"
+
+	"mosn.io/mosn/pkg/config/v2"
 )
 
 type edfSchduler struct {
 	lock        sync.Mutex
-	items       PriorityQueue
+	items       *edfHeap
 	currentTime float64
 }
 
 func newEdfScheduler(cap int) *edfSchduler {
 	return &edfSchduler{
-		items: make(PriorityQueue, 0, cap),
+		items: newEdfHeap(cap),
 	}
 }
 
@@ -47,11 +48,9 @@ type WeightItem interface {
 	Weight() uint32
 }
 
-// PriorityQueue
-type PriorityQueue []*edfEntry
-
 // Add new item into the edfSchduler
 func (edf *edfSchduler) Add(item WeightItem, weight float64) {
+	weight = edfFixedWeight(weight)
 	edf.lock.Lock()
 	defer edf.lock.Unlock()
 	entry := edfEntry{
@@ -60,7 +59,7 @@ func (edf *edfSchduler) Add(item WeightItem, weight float64) {
 		item:       item,
 		queuedTime: time.Now(),
 	}
-	heap.Push(&edf.items, &entry)
+	edf.items.Push(&entry)
 }
 
 // Pick entry with closest deadline and push again
@@ -68,38 +67,27 @@ func (edf *edfSchduler) Add(item WeightItem, weight float64) {
 func (edf *edfSchduler) NextAndPush(weightFunc func(item WeightItem) float64) interface{} {
 	edf.lock.Lock()
 	defer edf.lock.Unlock()
-	if len(edf.items) == 0 {
+	if edf.items.Empty() {
 		return nil
 	}
-	entry := edf.items[0]
+	entry := edf.items.Peek()
 	edf.currentTime = entry.deadline
 	weight := weightFunc(entry.item)
+	weight = edfFixedWeight(weight)
 	// update the index、deadline and put into priorityQueue again
 	entry.deadline = entry.deadline + 1.0/weight
 	entry.weight = weight
 	entry.queuedTime = time.Now()
-	heap.Fix(&edf.items, 0)
+	edf.items.Fix(0)
 	return entry.item
 }
 
-func (pq PriorityQueue) Len() int { return len(pq) }
-
-// Less make us always pop the ones with the smallest deadline
-//or the ones with a smaller index when the deadline is the same
-func (pq PriorityQueue) Less(i, j int) bool {
-	if pq[i].deadline == pq[j].deadline {
-		return pq[i].queuedTime.Before(pq[j].queuedTime)
+func edfFixedWeight(weight float64) float64 {
+	if weight <= float64(v2.MinHostWeight) {
+		return float64(v2.MinHostWeight)
 	}
-	return pq[i].deadline < pq[j].deadline
-}
-func (pq PriorityQueue) Swap(i, j int) { pq[i], pq[j] = pq[j], pq[i] }
-
-func (pq *PriorityQueue) Push(x interface{}) {
-	*pq = append(*pq, x.(*edfEntry))
-}
-
-func (pq *PriorityQueue) Pop() interface{} {
-	old := *pq
-	*pq = old[0 : len(old)-1]
-	return old[len(old)-1]
+	if weight >= float64(v2.MaxHostWeight) {
+		return float64(v2.MaxHostWeight)
+	}
+	return weight
 }

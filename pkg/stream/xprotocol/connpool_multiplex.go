@@ -26,8 +26,6 @@ import (
 	"mosn.io/api"
 	mosnctx "mosn.io/mosn/pkg/context"
 	"mosn.io/mosn/pkg/log"
-	"mosn.io/mosn/pkg/protocol"
-	"mosn.io/mosn/pkg/protocol/xprotocol"
 	"mosn.io/mosn/pkg/stream"
 	"mosn.io/mosn/pkg/types"
 	"mosn.io/pkg/utils"
@@ -39,7 +37,7 @@ type poolMultiplex struct {
 	*connpool
 
 	clientMux              sync.Mutex
-	activeClients          []sync.Map
+	activeClients          []sync.Map // TODO: do not need map anymore
 	currentCheckAndInitIdx int64
 
 	shutdown bool // pool is already shutdown
@@ -82,7 +80,7 @@ func NewPoolMultiplex(p *connpool) types.ConnectionPool {
 	}
 }
 
-func (p *poolMultiplex) init(client *activeClientMultiplex, sub types.ProtocolName, index int) {
+func (p *poolMultiplex) init(sub types.ProtocolName, index int) {
 	utils.GoWithRecover(func() {
 		if log.DefaultLogger.GetLogLevel() >= log.DEBUG {
 			log.DefaultLogger.Debugf("[stream] [sofarpc] [connpool] init host %s", p.Host().AddressString())
@@ -95,7 +93,7 @@ func (p *poolMultiplex) init(client *activeClientMultiplex, sub types.ProtocolNa
 		if p.shutdown {
 			return
 		}
-		ctx := mosnctx.WithValue(context.Background(), types.ContextSubProtocol, string(sub))
+		ctx := context.Background() // TODO: a new context ?
 		client, _ := p.newActiveClient(ctx, sub)
 		if client != nil {
 			client.state = Connected
@@ -104,7 +102,6 @@ func (p *poolMultiplex) init(client *activeClientMultiplex, sub types.ProtocolNa
 		} else {
 			p.activeClients[index].Delete(sub)
 		}
-
 	}, nil)
 }
 
@@ -120,7 +117,7 @@ func (p *poolMultiplex) CheckAndInit(ctx context.Context) bool {
 	}
 
 	var client *activeClientMultiplex
-	subProtocol := getSubProtocol(ctx)
+	subProtocol := p.connpool.codec.ProtocolName()
 
 	v, ok := p.activeClients[clientIdx].Load(subProtocol)
 	if !ok {
@@ -136,8 +133,10 @@ func (p *poolMultiplex) CheckAndInit(ctx context.Context) bool {
 		return true
 	}
 
-	if atomic.CompareAndSwapUint32(&client.state, Init, Connecting) {
-		p.init(client, subProtocol, int(clientIdx))
+	// init connection when client is Init or GoAway.
+	if atomic.CompareAndSwapUint32(&client.state, Init, Connecting) ||
+		atomic.CompareAndSwapUint32(&client.state, GoAway, Connecting) {
+		p.init(subProtocol, int(clientIdx))
 	}
 
 	return false
@@ -158,7 +157,7 @@ func (p *poolMultiplex) NewStream(ctx context.Context, receiver types.StreamRece
 		}
 	}
 
-	subProtocol := getSubProtocol(ctx)
+	subProtocol := p.connpool.codec.ProtocolName()
 
 	client, _ := p.activeClients[clientIdx].Load(subProtocol)
 
@@ -225,7 +224,7 @@ func (p *poolMultiplex) Shutdown() {
 }
 
 func (p *poolMultiplex) createStreamClient(context context.Context, connData types.CreateConnectionData) stream.Client {
-	return stream.NewStreamClient(context, protocol.Xprotocol, connData.Connection, connData.Host)
+	return stream.NewStreamClient(context, p.connpool.protocol, connData.Connection, connData.Host)
 }
 
 func (p *poolMultiplex) newActiveClient(ctx context.Context, subProtocol api.ProtocolName) (*activeClientMultiplex, types.PoolFailureReason) {
@@ -237,7 +236,6 @@ func (p *poolMultiplex) newActiveClient(ctx context.Context, subProtocol api.Pro
 	host := p.Host()
 	data := host.CreateConnection(ctx)
 	connCtx := mosnctx.WithValue(ctx, types.ContextKeyConnectionID, data.Connection.ID())
-	connCtx = mosnctx.WithValue(connCtx, types.ContextSubProtocol, string(subProtocol))
 	codecClient := p.createStreamClient(connCtx, data)
 	codecClient.AddConnectionEventListener(ac)
 	codecClient.SetStreamConnectionEventListener(ac)
@@ -249,10 +247,10 @@ func (p *poolMultiplex) newActiveClient(ctx context.Context, subProtocol api.Pro
 	// protocol is from onNewDetectStream
 	if subProtocol != "" {
 		// check heartbeat enable, hack: judge trigger result of Heartbeater
-		proto := xprotocol.GetProtocol(subProtocol)
+		proto := p.connpool.codec.NewXProtocol(ctx)
 		if heartbeater, ok := proto.(api.Heartbeater); ok && heartbeater.Trigger(ctx, 0) != nil {
 			// create keepalive
-			rpcKeepAlive := NewKeepAlive(codecClient, subProtocol, time.Second)
+			rpcKeepAlive := NewKeepAlive(codecClient, proto, time.Second)
 			rpcKeepAlive.StartIdleTimeout()
 			ac.keepAlive = &keepAliveListener{
 				keepAlive: rpcKeepAlive,
@@ -323,9 +321,13 @@ func (p *poolMultiplex) onConnectionEvent(ac *activeClientMultiplex, event api.C
 		default:
 			// do nothing
 		}
-		p.clientMux.Lock()
-		p.activeClients[ac.indexInPool].Delete(ac.subProtocol)
-		p.clientMux.Unlock()
+		// only delete the active client when the state is not GoAway
+		// since the goaway state client has already been overwritten.
+		if atomic.LoadUint32(&ac.state) != GoAway {
+			p.clientMux.Lock()
+			p.activeClients[ac.indexInPool].Delete(ac.subProtocol)
+			p.clientMux.Unlock()
+		}
 	} else if event == api.ConnectTimeout {
 		host.HostStats().UpstreamRequestTimeout.Inc(1)
 		host.ClusterInfo().Stats().UpstreamRequestTimeout.Inc(1)
@@ -364,6 +366,10 @@ func (ac *activeClientMultiplex) OnDestroyStream() {
 	host.HostStats().UpstreamRequestActive.Dec(1)
 	host.ClusterInfo().Stats().UpstreamRequestActive.Dec(1)
 	host.ClusterInfo().ResourceManager().Requests().Decrease()
+
+	if atomic.LoadUint32(&ac.state) == GoAway && ac.codecClient.ActiveRequestsNum() == 0 {
+		ac.codecClient.Close()
+	}
 }
 
 func (ac *activeClientMultiplex) OnResetStream(reason types.StreamResetReason) {
@@ -383,7 +389,13 @@ func (ac *activeClientMultiplex) OnResetStream(reason types.StreamResetReason) {
 }
 
 // types.StreamConnectionEventListener
-func (ac *activeClientMultiplex) OnGoAway() {}
+func (ac *activeClientMultiplex) OnGoAway() {
+	atomic.StoreUint32(&ac.state, GoAway)
+
+	if ac.codecClient.ActiveRequestsNum() == 0 {
+		ac.codecClient.Close()
+	}
+}
 
 const invalidClientID = -1
 
